@@ -189,8 +189,6 @@ void connectToWiFi() {
     syncTime();
     
     if (timeSync) {
-      startWebServer();
-      
       // Відправляємо перше повідомлення при підключенні
       sendToSQS();
       lastPingMillis = millis();
@@ -391,15 +389,12 @@ void sendToSQS() {
     
     // Читаємо відповідь
     bool success = false;
-    Serial.println("=== Response ===");
     while (client.available()) {
       String line = client.readStringUntil('\n');
-      Serial.println(line);
       if (line.indexOf("200 OK") > 0 || line.indexOf("MessageId") > 0) {
         success = true;
       }
     }
-    Serial.println("=== End Response ===");
     
     if (success) {
       Serial.println("✓ Message sent to SQS successfully!");
@@ -430,67 +425,6 @@ String urlEncode(String str) {
     }
   }
   return encoded;
-}
-
-void startWebServer() {
-  server.on("/", HTTP_GET, []() {
-    time_t now;
-    time(&now);
-    struct tm timeinfo;
-    gmtime_r(&now, &timeinfo);
-    char timeBuffer[64];
-    strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M:%S UTC", &timeinfo);
-    
-    String html = "<html><head><meta charset='utf-8'></head><body style='font-family:Arial;padding:20px;max-width:500px;margin:auto;'>";
-    html += "<h1>🤖 Yet Another Bot</h1>";
-    html += "<div style='background:#f0f0f0;padding:15px;border-radius:8px;margin:10px 0;'>";
-    html += "<p><strong>📱 Device ID:</strong> " + deviceName + "</p>";
-    html += "<p><strong>✅ Статус:</strong> Підключено</p>";
-    html += "<p><strong>🌐 IP:</strong> " + WiFi.localIP().toString() + "</p>";
-    html += "<p><strong>☁️ AWS Region:</strong> " + String(AWS_REGION) + "</p>";
-    html += "<p><strong>🕐 System Time:</strong> " + String(timeBuffer) + "</p>";
-    html += "<p><strong>⏰ Time Sync:</strong> " + String(timeSync ? "✓ Yes" : "✗ No") + "</p>";
-    html += "<p><strong>📦 Message Format:</strong> {\"deviceId\":\"" + deviceName + "\"}</p>";
-    unsigned long nextPing = (pingInterval - (millis() - lastPingMillis)) / 1000;
-    html += "<p><strong>⏱️ Наступне повідомлення через:</strong> " + String(nextPing) + "с</p>";
-    html += "</div>";
-    html += "<div style='margin:20px 0;'>";
-    html += "<a href='/send' style='display:inline-block;padding:10px 20px;background:#0088cc;color:white;text-decoration:none;border-radius:4px;margin:5px;'>📤 Надіслати зараз</a>";
-    html += "<a href='/synctime' style='display:inline-block;padding:10px 20px;background:#00aa00;color:white;text-decoration:none;border-radius:4px;margin:5px;'>🕐 Синхронізувати час</a>";
-    html += "<a href='/reset' style='display:inline-block;padding:10px 20px;background:#cc0000;color:white;text-decoration:none;border-radius:4px;margin:5px;'>🔧 Скинути налаштування</a>";
-    html += "</div>";
-    html += "<div style='background:#fff3cd;padding:10px;border-radius:4px;margin-top:20px;font-size:14px;'>";
-    html += "💡 <strong>Підказка:</strong> Утримуйте кнопку BOOT 3 секунди для скидання налаштувань";
-    html += "</div>";
-    html += "</body></html>";
-    server.send(200, "text/html", html);
-  });
-  
-  server.on("/send", HTTP_GET, []() {
-    sendToSQS();
-    String html = "<html><head><meta charset='utf-8'><meta http-equiv='refresh' content='2;url=/'></head><body style='font-family:Arial;padding:20px;text-align:center;'>";
-    html += "<h2>📤 Повідомлення надіслано!</h2><p>Перенаправлення...</p></body></html>";
-    server.send(200, "text/html", html);
-  });
-  
-  server.on("/synctime", HTTP_GET, []() {
-    syncTime();
-    String html = "<html><head><meta charset='utf-8'><meta http-equiv='refresh' content='2;url=/'></head><body style='font-family:Arial;padding:20px;text-align:center;'>";
-    html += "<h2>🕐 Синхронізація часу...</h2><p>Перенаправлення...</p></body></html>";
-    server.send(200, "text/html", html);
-  });
-  
-  server.on("/reset", HTTP_GET, []() {
-    preferences.clear();
-    String html = "<html><head><meta charset='utf-8'></head><body style='font-family:Arial;padding:20px;text-align:center;'>";
-    html += "<h2>🔄 Скинуто!</h2><p>Перезавантаження...</p></body></html>";
-    server.send(200, "text/html", html);
-    delay(1000);
-    ESP.restart();
-  });
-  
-  server.begin();
-  Serial.println("Web server started");
 }
 
 void updateLED() {
@@ -559,11 +493,12 @@ void loop() {
   }
   
   if (WiFi.getMode() == WIFI_AP) {
+    // В режимі налаштування - обробляємо веб-сервер
     dnsServer.processNextRequest();
     server.handleClient();
   } else if (WiFi.status() == WL_CONNECTED) {
+    // Підключені до WiFi - тільки відправка в SQS, БЕЗ веб-сервера
     blinkInterval = 2000;
-    server.handleClient();
     
     // Перевіряємо синхронізацію часу періодично
     if (!timeSync) {
@@ -587,6 +522,7 @@ void loop() {
     connectToWiFi();
   }
   
+  // Serial команди
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
@@ -594,13 +530,15 @@ void loop() {
       Serial.println("Resetting config...");
       preferences.clear();
       ESP.restart();
-    } else if (cmd == "time") {
-      time_t now;
-      time(&now);
-      Serial.print("Current time: ");
-      Serial.println(now);
+    } else if (cmd == "send") {
+      sendToSQS();
     } else if (cmd == "synctime") {
       syncTime();
+    } else if (cmd == "status") {
+      Serial.println("=== Status ===");
+      Serial.println("Device ID: " + deviceName);
+      Serial.println("WiFi: " + String(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected"));
+      Serial.println("Time Sync: " + String(timeSync ? "Yes" : "No"));
     }
   }
   
