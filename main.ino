@@ -33,21 +33,21 @@
 #endif
 
 #ifdef BOARD_C3_SUPERMINI
-  const int LED_RED_PIN = 8;    // Червоний LED на C3 Super Mini
-  const int LED_BLUE_PIN = 3;   // Синій LED на C3 Super Mini
+  const int LED_PIN = 8;        // Синій LED (active-low), червоний = power LED (некерований)
   const int RESET_BUTTON = 9;   // Кнопка BOOT на C3 Super Mini
   const char* BOARD_NAME = "ESP32-C3-SuperMini";
 #endif
 
 // ========== НАЛАШТУВАННЯ AWS SQS ==========
 
+const char* DEVICE_SN = "SN-003";
 // ==========================================
 
 WebServer server(80);
 DNSServer dnsServer;
 Preferences preferences;
 
-const char* ap_ssid = "Yet-Another-Bot-Setup";
+const char* ap_ssid = "YAB-Setup";
 
 String ssid = "";
 String password = "";
@@ -56,6 +56,7 @@ String deviceName = "";
 // Для керування миганням
 unsigned long previousMillis = 0;
 bool ledState = false;
+bool ledEnabled = true;  // false = ручний режим для тестування
 
 // Режими блимання
 enum BlinkMode {
@@ -106,9 +107,9 @@ const int daylightOffset_sec = 0;
 //   CONNECTED  → зелений блимає 2000ms
 //
 // DevKit V1 / C3 Super Mini (окремі червоний + синій):
-//   SETUP      → обидва блимають 500ms
-//   CONNECTING → червоний блимає 200ms
-//   CONNECTED  → синій блимає 2000ms
+//   SETUP      → синій блимає 500ms
+//   CONNECTING → червоний горить, синій вимкнений
+//   CONNECTED  → обидва горять постійно
 
 void ledInit() {
   #ifdef BOARD_C3_ZERO
@@ -117,11 +118,15 @@ void ledInit() {
     pixel.setPixelColor(0, 0);
     pixel.show();
   #endif
-  #if defined(BOARD_DEVKIT_V1) || defined(BOARD_C3_SUPERMINI)
+  #ifdef BOARD_DEVKIT_V1
     pinMode(LED_RED_PIN, OUTPUT);
     pinMode(LED_BLUE_PIN, OUTPUT);
     digitalWrite(LED_RED_PIN, LOW);
     digitalWrite(LED_BLUE_PIN, LOW);
+  #endif
+  #ifdef BOARD_C3_SUPERMINI
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);  // active-low: HIGH = вимкнений
   #endif
 }
 
@@ -130,9 +135,13 @@ void ledSetRGB(uint8_t r, uint8_t g, uint8_t b) {
     pixel.setPixelColor(0, pixel.Color(r, g, b));
     pixel.show();
   #endif
-  #if defined(BOARD_DEVKIT_V1) || defined(BOARD_C3_SUPERMINI)
+  #ifdef BOARD_DEVKIT_V1
     digitalWrite(LED_RED_PIN, r > 0 ? HIGH : LOW);
     digitalWrite(LED_BLUE_PIN, b > 0 ? HIGH : LOW);
+  #endif
+  #ifdef BOARD_C3_SUPERMINI
+    // active-low: LOW = горить, HIGH = вимкнений
+    digitalWrite(LED_PIN, (r > 0 || g > 0 || b > 0) ? LOW : HIGH);
   #endif
 }
 
@@ -150,7 +159,7 @@ void ledShowState(BlinkMode mode, bool on) {
       #ifdef BOARD_C3_ZERO
         ledSetRGB(0, 0, 255);     // Синій
       #endif
-      #if defined(BOARD_DEVKIT_V1) || defined(BOARD_C3_SUPERMINI)
+      #ifdef BOARD_DEVKIT_V1
         ledSetRGB(255, 0, 255);   // Обидва LED
       #endif
       break;
@@ -161,17 +170,86 @@ void ledShowState(BlinkMode mode, bool on) {
       #ifdef BOARD_C3_ZERO
         ledSetRGB(0, 255, 0);     // Зелений
       #endif
-      #if defined(BOARD_DEVKIT_V1) || defined(BOARD_C3_SUPERMINI)
+      #ifdef BOARD_DEVKIT_V1
         ledSetRGB(0, 0, 255);     // Синій
       #endif
       break;
   }
 }
 
-void updateLED() {
-  unsigned long currentMillis = millis();
-  unsigned int interval;
+// Негайно застосувати LED-стан для поточного режиму
+void applyLEDState() {
+  #ifdef BOARD_DEVKIT_V1
+    switch (currentBlinkMode) {
+      case BLINK_SETUP:
+        digitalWrite(LED_RED_PIN, LOW);
+        digitalWrite(LED_BLUE_PIN, HIGH);
+        break;
+      case BLINK_CONNECTING:
+        digitalWrite(LED_RED_PIN, HIGH);
+        digitalWrite(LED_BLUE_PIN, LOW);
+        break;
+      case BLINK_CONNECTED:
+        digitalWrite(LED_RED_PIN, HIGH);
+        digitalWrite(LED_BLUE_PIN, HIGH);
+        break;
+    }
+  #endif
+  #ifdef BOARD_C3_SUPERMINI
+    // Один LED (active-low): SETUP = блимає, CONNECTING = вимк, CONNECTED = горить
+    switch (currentBlinkMode) {
+      case BLINK_SETUP:
+        digitalWrite(LED_PIN, LOW);   // Горить (почнемо з увімк, далі блимає)
+        break;
+      case BLINK_CONNECTING:
+        digitalWrite(LED_PIN, HIGH);  // Вимкнений
+        break;
+      case BLINK_CONNECTED:
+        digitalWrite(LED_PIN, LOW);   // Горить постійно
+        break;
+    }
+  #endif
+  #ifdef BOARD_C3_ZERO
+    ledShowState(currentBlinkMode, true);
+  #endif
+  previousMillis = millis();
+  ledState = true;
+}
 
+void updateLED() {
+  if (!ledEnabled) return;
+  unsigned long currentMillis = millis();
+
+  #ifdef BOARD_DEVKIT_V1
+    switch (currentBlinkMode) {
+      case BLINK_SETUP:
+        digitalWrite(LED_RED_PIN, LOW);
+        break;
+      case BLINK_CONNECTING:
+        digitalWrite(LED_RED_PIN, HIGH);
+        digitalWrite(LED_BLUE_PIN, LOW);
+        return;
+      case BLINK_CONNECTED:
+        digitalWrite(LED_RED_PIN, HIGH);
+        digitalWrite(LED_BLUE_PIN, HIGH);
+        return;
+    }
+  #endif
+
+  #ifdef BOARD_C3_SUPERMINI
+    // CONNECTING і CONNECTED — статичний стан, не блимає
+    if (currentBlinkMode == BLINK_CONNECTING) {
+      digitalWrite(LED_PIN, HIGH);  // Вимкнений
+      return;
+    }
+    if (currentBlinkMode == BLINK_CONNECTED) {
+      digitalWrite(LED_PIN, LOW);   // Горить постійно
+      return;
+    }
+  #endif
+
+  // Інтервал для блимаючих LED-ів
+  unsigned int interval;
   switch (currentBlinkMode) {
     case BLINK_SETUP:      interval = 500;  break;
     case BLINK_CONNECTING: interval = 200;  break;
@@ -181,7 +259,19 @@ void updateLED() {
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
     ledState = !ledState;
-    ledShowState(currentBlinkMode, ledState);
+
+    #ifdef BOARD_C3_ZERO
+      ledShowState(currentBlinkMode, ledState);
+    #endif
+
+    #ifdef BOARD_DEVKIT_V1
+      digitalWrite(LED_BLUE_PIN, ledState ? HIGH : LOW);
+    #endif
+
+    #ifdef BOARD_C3_SUPERMINI
+      // active-low: LOW = горить, HIGH = вимкнений
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    #endif
   }
 }
 
@@ -325,6 +415,7 @@ void startWiFiConnect() {
   wifiState = WIFI_STATE_CONNECTING;
   wifiConnectStart = millis();
   currentBlinkMode = BLINK_CONNECTING;
+  applyLEDState();
 }
 
 void handleWiFiConnecting() {
@@ -336,6 +427,7 @@ void handleWiFiConnecting() {
 
     wifiState = WIFI_STATE_CONNECTED;
     currentBlinkMode = BLINK_CONNECTED;
+    applyLEDState();
     timeSync = false;
 
     syncTime();
@@ -358,16 +450,18 @@ void handleWiFiConnecting() {
 
 void startAPMode() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ap_ssid);
+  String apName = String(ap_ssid) + "-" + String(DEVICE_SN);
+  WiFi.softAP(apName.c_str());
 
   Serial.println("AP Started!");
   Serial.print("Connect to WiFi: ");
-  Serial.println(ap_ssid);
+  Serial.println(apName);
   Serial.print("Go to: http://");
   Serial.println(WiFi.softAPIP());
 
   wifiState = WIFI_STATE_AP;
   currentBlinkMode = BLINK_SETUP;
+  applyLEDState();
 
   dnsServer.start(53, "*", WiFi.softAPIP());
 
@@ -458,7 +552,7 @@ void sendToSQS() {
   String host = queueUrl.substring(hostStart, pathStart);
   String path = queueUrl.substring(pathStart);
 
-  String jsonMessage = "{\"deviceId\":\"" + deviceName + "\"}";
+  String jsonMessage = "{\"deviceId\":\"" + deviceName + "\",\"deviceSN\":\"" + String(DEVICE_SN) + "\"}";
   String payload = "Action=SendMessage&MessageBody=" + urlEncode(jsonMessage) + "&Version=2012-11-05";
   String payloadHash = sha256Hash(payload);
 
@@ -617,14 +711,28 @@ void handleSerialCommands() {
       case BLINK_CONNECTING: Serial.println("CONNECTING"); break;
       case BLINK_CONNECTED: Serial.println("CONNECTED"); break;
     }
+  } else if (cmd == "led stop") {
+    ledEnabled = false;
+    ledOff();
+    Serial.println("LED auto-update OFF. Use: red on/off, blue on/off");
+  } else if (cmd == "led start") {
+    ledEnabled = true;
+    applyLEDState();
+    Serial.println("LED auto-update ON");
   } else if (cmd == "led") {
     Serial.println("Testing LED...");
     ledSetRGB(255, 0, 0); delay(1000);
     ledSetRGB(0, 255, 0); delay(1000);
     ledSetRGB(0, 0, 255); delay(1000);
     ledOff();
+  } else if (cmd == "led on") {
+    Serial.println("LED pin 8 -> LOW (on)");
+    digitalWrite(LED_PIN, LOW);
+  } else if (cmd == "led off") {
+    Serial.println("LED pin 8 -> HIGH (off)");
+    digitalWrite(LED_PIN, HIGH);
   } else if (cmd == "help") {
-    Serial.println("Commands: reset, send, synctime, status, heap, led, help");
+    Serial.println("Commands: reset, send, synctime, status, heap, led, led stop, led start, led on, led off, help");
   }
 }
 
@@ -680,6 +788,7 @@ void loop() {
         Serial.println("WiFi lost!");
         wifiState = WIFI_STATE_IDLE;
         currentBlinkMode = BLINK_CONNECTING;
+        applyLEDState();
         timeSync = false;
         lastReconnectMillis = millis();
         break;
